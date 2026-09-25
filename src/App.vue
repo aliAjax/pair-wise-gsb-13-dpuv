@@ -1,191 +1,64 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { ref } from "vue";
+import { useUnloadStore } from "./stores/unload";
+import type { BatchDraft, UnloadBatch } from "./domain/types";
+import { toDraft } from "./data/unloadRepository";
+import UnloadForm from "./components/UnloadForm.vue";
+import BatchCard from "./components/BatchCard.vue";
+import ReviewDialog from "./components/ReviewDialog.vue";
 
-type Field = {
-  key: string;
-  label: string;
-  type?: "number" | "date" | "select";
-  options?: readonly string[];
-};
+const store = useUnloadStore();
 
-type RecordItem = {
-  id: string;
-  status: string;
-  notes: string;
-  createdAt: string;
-  [key: string]: string | number;
-};
+const reviewTarget = ref<UnloadBatch | null>(null);
+const amendTarget = ref<UnloadBatch | null>(null);
+const amendDraft = ref<BatchDraft | null>(null);
+const formKey = ref(0);
+const flash = ref("");
 
-const project = {
-  "number": 7,
-  "folder": "dfwl/frontend/dfwlfront-7",
-  "framework": "vue",
-  "title": "加油站班次交接",
-  "subtitle": "录入油品销量和收款数据，自动计算当班总收入。",
-  "industry": "石油",
-  "stack": [
-    "Vue3",
-    "Vite",
-    "TypeScript",
-    "Element Plus"
-  ],
-  "storageKey": "dfwlfront-7-shift",
-  "formTitle": "新增交接记录",
-  "primaryAction": "保存交接",
-  "entityLabel": "班次",
-  "statuses": [
-    "待复核",
-    "已复核",
-    "有差异"
-  ],
-  "filters": [
-    "全部班次",
-    "早班",
-    "中班",
-    "晚班"
-  ],
-  "fields": [
-    {
-      "key": "shift",
-      "label": "班次",
-      "type": "select",
-      "options": [
-        "早班",
-        "中班",
-        "晚班"
-      ]
-    },
-    {
-      "key": "fuelSales",
-      "label": "油品销量L",
-      "type": "number"
-    },
-    {
-      "key": "cash",
-      "label": "现金收入",
-      "type": "number"
-    },
-    {
-      "key": "digital",
-      "label": "电子支付",
-      "type": "number"
-    }
-  ],
-  "records": [
-    {
-      "shift": "早班",
-      "fuelSales": 4280,
-      "cash": 8300,
-      "digital": 21000,
-      "status": "已复核",
-      "notes": "账实一致"
-    },
-    {
-      "shift": "中班",
-      "fuelSales": 3910,
-      "cash": 6400,
-      "digital": 19800,
-      "status": "待复核",
-      "notes": "等待站长确认"
-    }
-  ],
-  "metricLabels": [
-    "交接记录",
-    "已复核",
-    "总收入"
-  ]
-} as const;
-
-const fields = project.fields as readonly Field[];
-const statuses = [...project.statuses];
-
-function createBlank() {
-  return Object.fromEntries(fields.map((field) => [field.key, field.type === "number" ? 0 : ""]));
-}
-
-function loadRecords(): RecordItem[] {
-  const raw = localStorage.getItem(project.storageKey);
-  if (!raw) {
-    return project.records.map((record, index) => ({
-      ...record,
-      id: `seed-${index + 1}`,
-      createdAt: new Date(Date.now() - index * 86400000).toISOString()
-    })) as RecordItem[];
+function onSubmitted(draft: BatchDraft, reason: string) {
+  if (amendTarget.value && amendDraft.value) {
+    const versioned = store.amend(amendTarget.value, draft, reason);
+    amendTarget.value = null;
+    amendDraft.value = null;
+    flash.value = `已另存为 v${versioned.version}，旧版冻结保留：${versioned.status === "held" ? "本版需复核后入账" : "本版已入账"}`;
+  } else {
+    const batch = store.saveNew(draft);
+    flash.value =
+      batch.status === "held"
+        ? `批次 ${batch.batchNo} 命中停待条件，已停待，复核入账前不计账`
+        : `批次 ${batch.batchNo} 验收合格，已入账`;
   }
-  try {
-    return JSON.parse(raw) as RecordItem[];
-  } catch {
-    return [];
-  }
+  formKey.value += 1;
 }
 
-const records = ref<RecordItem[]>(loadRecords());
-const form = reactive<Record<string, string | number>>(createBlank());
-const note = ref("");
-const filter = ref(project.filters[0]);
-
-const filteredRecords = computed(() => {
-  if (filter.value.startsWith("全部")) return records.value;
-  return records.value.filter((record) => Object.values(record).includes(filter.value));
-});
-
-const metrics = computed(() => {
-  const total = records.value.length;
-  const second = records.value.filter((record) => record.status === statuses[1]).length;
-  const third = records.value.filter((record) => record.status === statuses[2]).length;
-  const numberValues = records.value.flatMap((record) =>
-    fields.filter((field) => field.type === "number").map((field) => Number(record[field.key] || 0))
-  );
-  const sum = numberValues.reduce((acc, value) => acc + value, 0);
-  return [total, second || sum, third || Math.round(sum / Math.max(total, 1))];
-});
-
-const chartRows = computed(() => statuses.map((status) => ({
-  status,
-  value: records.value.filter((record) => record.status === status).length
-})));
-
-const maxChart = computed(() => Math.max(1, ...chartRows.value.map((row) => row.value)));
-
-function persist() {
-  localStorage.setItem(project.storageKey, JSON.stringify(records.value));
+function startAmend(batch: UnloadBatch) {
+  amendTarget.value = batch;
+  amendDraft.value = toDraft(batch);
+  formKey.value += 1;
+  flash.value = "";
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-function nextStatus(status: string) {
-  const index = statuses.indexOf(status);
-  return statuses[(index + 1) % statuses.length];
+function cancelAmend() {
+  amendTarget.value = null;
+  amendDraft.value = null;
+  formKey.value += 1;
 }
 
-function primaryText(record: RecordItem) {
-  const first = fields[0];
-  const second = fields[1];
-  return [record[first.key], record[second.key]].filter(Boolean).join(" / ") || project.entityLabel;
+function onReviewConfirmed(batchId: string, payload: {
+  reviewer: string;
+  responsibility: string;
+  disposition: string;
+}) {
+  store.review(batchId, payload);
+  reviewTarget.value = null;
+  flash.value = "复核完成，本批次已入账";
 }
 
-function submit() {
-  records.value = [
-    {
-      ...form,
-      id: crypto.randomUUID(),
-      status: statuses[0],
-      notes: note.value || "暂无备注",
-      createdAt: new Date().toISOString()
-    } as RecordItem,
-    ...records.value
-  ];
-  Object.assign(form, createBlank());
-  note.value = "";
-  persist();
-}
-
-function flow(record: RecordItem) {
-  record.status = nextStatus(record.status);
-  persist();
-}
-
-function remove(id: string) {
-  records.value = records.value.filter((record) => record.id !== id);
-  persist();
+function resetQuery() {
+  store.query.plate = "";
+  store.query.date = "";
+  store.query.status = "all";
 }
 </script>
 
@@ -194,78 +67,97 @@ function remove(id: string) {
     <div class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">{{ project.industry }}行业前端最小闭环</p>
-          <h1>{{ project.title }}</h1>
-          <p class="subtitle">{{ project.subtitle }}</p>
+          <p class="eyebrow">石油行业 · 罐车到站卸油</p>
+          <h1>卸油验收台</h1>
+          <p class="subtitle">
+            按仓登记铅封、交接温度、罐车表与站内表，以 20℃ 为基准自动折算交付量；
+            铅封不符、温差超 3℃ 或折算短溢超 0.5% 先停待复核，复核定责后入账；
+            已复核批次冻结，改单带原因另建版本并保留旧值。
+          </p>
         </div>
         <div class="stack">
-          <span v-for="item in project.stack" :key="item" class="tag">{{ item }}</span>
+          <span class="tag">Vue3</span>
+          <span class="tag">TypeScript</span>
+          <span class="tag">Element Plus</span>
+          <span class="tag">本地持久化</span>
         </div>
       </header>
 
       <section class="metrics">
-        <article v-for="(label, index) in project.metricLabels" :key="label" class="metric">
-          <span>{{ label }}</span>
-          <strong>{{ metrics[index] }}</strong>
+        <article class="metric">
+          <span>批次（当前筛选）</span>
+          <strong>{{ store.metrics.total }}</strong>
+        </article>
+        <article class="metric metric-held">
+          <span>停待复核</span>
+          <strong>{{ store.metrics.held }}</strong>
+        </article>
+        <article class="metric metric-posted">
+          <span>已入账</span>
+          <strong>{{ store.metrics.posted }}</strong>
+        </article>
+        <article class="metric">
+          <span>已入账短溢合计 L</span>
+          <strong :class="store.metrics.diff > 0 ? 'val-up' : 'val-down'">
+            {{ store.metrics.diff > 0 ? "+" : "" }}{{ store.metrics.diff.toFixed(2) }}
+          </strong>
         </article>
       </section>
 
-      <section class="workspace">
-        <form class="panel" @submit.prevent="submit">
-          <h2>{{ project.formTitle }}</h2>
-          <div class="form-grid">
-            <label v-for="field in fields" :key="field.key">
-              {{ field.label }}
-              <select v-if="field.type === 'select'" v-model="form[field.key]" required>
-                <option value="">请选择</option>
-                <option v-for="option in field.options" :key="option">{{ option }}</option>
+      <UnloadForm
+        :key="formKey"
+        :mode="amendTarget ? 'amend' : 'create'"
+        :initial="amendDraft ?? undefined"
+        @submitted="onSubmitted"
+        @cancelled="cancelAmend"
+      />
+
+      <p v-if="flash" class="flash">{{ flash }}</p>
+
+      <section class="list-panel">
+        <div class="toolbar">
+          <h2>交接批次查询</h2>
+          <div class="query-bar">
+            <label class="query-item">
+              车牌
+              <input v-model="store.query.plate" placeholder="按车牌查询" />
+            </label>
+            <label class="query-item">
+              日期
+              <input v-model="store.query.date" type="date" />
+            </label>
+            <label class="query-item">
+              状态
+              <select v-model="store.query.status">
+                <option value="all">全部</option>
+                <option value="held">停待复核</option>
+                <option value="posted">已入账</option>
               </select>
-              <input v-else v-model="form[field.key]" :type="field.type || 'text'" required />
             </label>
-            <label>
-              备注
-              <textarea v-model="note" placeholder="填写处理说明或现场备注" />
-            </label>
-            <button type="submit">{{ project.primaryAction }}</button>
+            <button type="button" class="secondary" @click="resetQuery">重置</button>
           </div>
-        </form>
+        </div>
 
-        <section class="list-panel">
-          <div class="toolbar">
-            <h2>{{ project.entityLabel }}列表</h2>
-            <select v-model="filter">
-              <option v-for="item in project.filters" :key="item">{{ item }}</option>
-            </select>
+        <div class="record-grid">
+          <div v-if="store.filteredBatches.length === 0" class="empty">
+            没有按车牌和日期查到批次，换个条件试试
           </div>
-
-          <div class="record-grid">
-            <div v-if="filteredRecords.length === 0" class="empty">暂无匹配数据</div>
-            <article v-for="record in filteredRecords" :key="record.id" class="record">
-              <div class="record-head">
-                <p class="record-title">{{ primaryText(record) }}</p>
-                <span class="status">{{ record.status }}</span>
-              </div>
-              <div class="details">
-                <span v-for="field in fields" :key="field.key">{{ field.label }}: {{ record[field.key] }}</span>
-              </div>
-              <p class="note">{{ record.notes }}</p>
-              <div class="actions">
-                <button type="button" @click="flow(record)">流转状态</button>
-                <button class="secondary" type="button" @click="navigator.clipboard?.writeText(primaryText(record))">复制摘要</button>
-                <button class="danger" type="button" @click="remove(record.id)">删除</button>
-              </div>
-            </article>
-          </div>
-
-          <div class="mini-chart">
-            <div v-for="row in chartRows" :key="row.status" class="bar">
-              <span>{{ row.status }}</span>
-              <div class="bar-track"><div class="bar-fill" :style="{ width: `${(row.value / maxChart) * 100}%` }" /></div>
-              <strong>{{ row.value }}</strong>
-            </div>
-          </div>
-        </section>
+          <BatchCard
+            v-for="batch in store.filteredBatches"
+            :key="batch.id"
+            :batch="batch"
+            :versions="store.versionsOf(batch)"
+            @review="reviewTarget = $event"
+            @amend="startAmend"
+          />
+        </div>
       </section>
+
+      <ReviewDialog
+        :batch="reviewTarget"
+        @close="reviewTarget = null"
+        @confirmed="onReviewConfirmed"
+      />
     </div>
   </main>
 </template>
